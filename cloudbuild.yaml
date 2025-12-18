@@ -1,0 +1,37 @@
+steps:
+  - name: 'ubuntu'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        apt-get update && apt-get install -y zip jq
+        
+        VERSION=$(grep -oP "Version:\s*\K[0-9.]+" ${_PLUGIN_SLUG}.php | head -1)
+        echo "Building version: $VERSION"
+        
+        mkdir -p build/${_PLUGIN_SLUG}
+        cp ${_PLUGIN_SLUG}.php build/${_PLUGIN_SLUG}/
+        cp -r includes build/${_PLUGIN_SLUG}/ 2>/dev/null || true
+        cp -r assets build/${_PLUGIN_SLUG}/ 2>/dev/null || true
+        cp README.md build/${_PLUGIN_SLUG}/ 2>/dev/null || true
+        
+        cd build && zip -r plugin.zip ${_PLUGIN_SLUG}
+        
+        cp ../plugin-info.json . 2>/dev/null || echo '{}' > plugin-info.json
+        jq --arg v "$VERSION" --arg url "https://storage.googleapis.com/${_BUCKET}/${_PLUGIN_SLUG}/${_PLUGIN_SLUG}.zip" '.version=$v|.download_url=$url' plugin-info.json > tmp.json && mv tmp.json plugin-info.json
+
+  - name: 'gcr.io/cloud-builders/gsutil'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gsutil cp build/plugin.zip gs://${_BUCKET}/${_PLUGIN_SLUG}/${_PLUGIN_SLUG}.zip
+        gsutil -h "Cache-Control:no-cache" cp build/plugin-info.json gs://${_BUCKET}/${_PLUGIN_SLUG}/plugin-info.json
+        gsutil acl ch -u AllUsers:R gs://${_BUCKET}/${_PLUGIN_SLUG}/${_PLUGIN_SLUG}.zip || true
+        gsutil acl ch -u AllUsers:R gs://${_BUCKET}/${_PLUGIN_SLUG}/plugin-info.json || true
+
+substitutions:
+  _BUCKET: 'tanapon-wp-plugins'
+  _PLUGIN_SLUG: 'ga4-dynamic-tracker'
+
+timeout: '600s'
