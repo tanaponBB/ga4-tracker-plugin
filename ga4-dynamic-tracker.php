@@ -3,7 +3,7 @@
  * Plugin Name: GA4 Dynamic Tracker
  * Plugin URI: https://example.com/ga4-dynamic-tracker
  * Description: Ultra-dynamic GA4 tracking system with payment method & sale price tracking for WooCommerce
- * Version: 1.0.2
+ * Version: 1.0.1
  * Author: TanaponBB
  * Author URI: https://theneighbors.co/
  * License: GPL v2 or later
