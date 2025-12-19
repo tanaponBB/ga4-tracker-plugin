@@ -27,11 +27,17 @@ if (!defined("WPINC")) {
 }
 
 // Define plugin constants
-define("GA4DT_VERSION", "1.1.0");
+define("GA4DT_VERSION", "1.0.1");
 define("GA4DT_PLUGIN_DIR", plugin_dir_path(__FILE__));
 define("GA4DT_PLUGIN_URL", plugin_dir_url(__FILE__));
 define("GA4DT_PLUGIN_BASENAME", plugin_basename(__FILE__));
 define("GA4DT_PLUGIN_FILE", __FILE__);
+
+/**
+ * Auto-Update Configuration
+ * URL to plugin-info.json on Google Cloud Storage
+ */
+define("GA4DT_UPDATE_URL", "https://storage.googleapis.com/tanapon-wp-plugins/ga4-dynamic-tracker/plugin-info.json");
 
 /**
  * Main Plugin Class
@@ -86,12 +92,12 @@ final class GA4_Dynamic_Tracker
 		// Initialize tracking
 		add_action("init", [$this, "init_tracking"]);
 
+		// Initialize auto-updater (runs on admin only)
+		add_action("admin_init", [$this, "init_updater"]);
+
 		// Register activation/deactivation hooks
 		register_activation_hook(GA4DT_PLUGIN_FILE, [$this, "activate"]);
 		register_deactivation_hook(GA4DT_PLUGIN_FILE, [$this, "deactivate"]);
-
-		// Add settings link to plugins page
-		// add_filter('plugin_action_links_' . GA4DT_PLUGIN_BASENAME, [$this, 'add_settings_link']);
 	}
 
 	/**
@@ -128,6 +134,10 @@ final class GA4_Dynamic_Tracker
 		// Set activation flag
 		add_option("ga4dt_activated", true);
 
+		// Clear update cache on activation
+		delete_transient("ga4dt_update_data");
+		delete_site_transient("update_plugins");
+
 		// Flush rewrite rules
 		flush_rewrite_rules();
 	}
@@ -138,21 +148,9 @@ final class GA4_Dynamic_Tracker
 	public function deactivate()
 	{
 		delete_option("ga4dt_activated");
+		delete_transient("ga4dt_update_data");
 		flush_rewrite_rules();
 	}
-
-	/**
-	 * Add settings link
-	 */
-	// public function add_settings_link($links) {
-	//     $settings_link = sprintf(
-	//         '<a href="%s">%s</a>',
-	//         esc_url(admin_url('admin.php?page=ga4-dynamic-tracker')),
-	//         esc_html__('Settings', 'ga4-dynamic-tracker')
-	//     );
-	//     array_unshift($links, $settings_link);
-	//     return $links;
-	// }
 
 	/**
 	 * Check dependencies
@@ -197,6 +195,19 @@ final class GA4_Dynamic_Tracker
 
 		// Initialize tracker
 		GA4DT_Tracker::instance();
+	}
+
+	/**
+	 * Initialize auto-updater
+	 */
+	public function init_updater()
+	{
+		// Load updater class
+		$updater_file = GA4DT_PLUGIN_DIR . "includes/class-ga4dt-updater.php";
+		if (file_exists($updater_file)) {
+			require_once $updater_file;
+			GA4DT_Plugin_Updater::instance();
+		}
 	}
 }
 

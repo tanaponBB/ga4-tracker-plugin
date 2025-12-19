@@ -1,0 +1,29 @@
+{
+    "name": "GA4 Dynamic Tracker",
+    "slug": "ga4-dynamic-tracker",
+    "version": "1.0.1",
+    "author": "<a href='https://theneighbors.co/'>TanaponBB</a>",
+    "author_profile": "https://theneighbors.co/",
+    "homepage": "https://example.com/ga4-dynamic-tracker",
+    "requires": "5.8",
+    "tested": "6.7",
+    "requires_php": "7.4",
+    "downloaded": 0,
+    "last_updated": "2025-12-19 00:00:00",
+    "download_url": "https://storage.googleapis.com/tanapon-wp-plugins/ga4-dynamic-tracker/ga4-dynamic-tracker.zip",
+    "sections": {
+        "description": "<p>Ultra-dynamic GA4 tracking system with payment method & sale price tracking for WooCommerce.</p><h4>Features</h4><ul><li><strong>Automatic Product Tracking</strong> - Tracks view_item_list, view_item, select_item</li><li><strong>Cart Events</strong> - add_to_cart, remove_from_cart, view_cart</li><li><strong>Checkout Events</strong> - begin_checkout, add_shipping_info, add_payment_info</li><li><strong>Purchase Tracking</strong> - Complete purchase event with all details</li><li><strong>Sale Price Support</strong> - Tracks original price, discount amount, discount percentage</li><li><strong>Security Features</strong> - Data sanitization, secure cookies, rate limiting</li></ul>",
+        "installation": "<ol><li>Upload the plugin files to <code>/wp-content/plugins/ga4-dynamic-tracker</code></li><li>Activate the plugin through the 'Plugins' screen</li><li>Ensure WooCommerce is installed and activated</li><li>Configure GTM to capture the dataLayer events</li></ol>",
+        "changelog": "<h4>1.0.1</h4><ul><li>Added auto-update support from GCS</li><li>Added Check for updates link</li></ul><h4>1.0.0</h4><ul><li>Initial release</li></ul>",
+        "faq": "<h4>Does this require WooCommerce?</h4><p>Yes, this plugin requires WooCommerce to be installed and active.</p><h4>Do I need Google Tag Manager?</h4><p>Yes, configure GTM to capture the dataLayer events pushed by this plugin.</p>"
+    },
+    "banners": {
+        "low": "",
+        "high": ""
+    },
+    "icons": {
+        "1x": "",
+        "2x": ""
+    },
+    "upgrade_notice": "Version 1.0.1 - Added auto-update support."
+}
