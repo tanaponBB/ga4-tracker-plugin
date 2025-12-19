@@ -5,7 +5,7 @@
  * Handles automatic plugin updates from Google Cloud Storage.
  *
  * @package GA4_Dynamic_Tracker
- * @since 1.1.0
+ * @since 1.0.1
  */
 
 if (!defined('ABSPATH')) {
