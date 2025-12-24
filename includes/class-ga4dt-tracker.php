@@ -5,261 +5,338 @@
  * @package GA4_Dynamic_Tracker
  */
 
-if (!defined('ABSPATH')) {
-    exit;
+if (!defined("ABSPATH")) {
+	exit();
 }
 
 /**
  * GA4DT Tracker Class
  */
-class GA4DT_Tracker {
+class GA4DT_Tracker
+{
+	/**
+	 * Single instance
+	 */
+	private static $instance = null;
 
-    /**
-     * Single instance
-     */
-    private static $instance = null;
+	/**
+	 * Get instance
+	 */
+	public static function instance()
+	{
+		if (is_null(self::$instance)) {
+			self::$instance = new self();
+		}
+		return self::$instance;
+	}
 
-    /**
-     * Get instance
-     */
-    public static function instance() {
-        if (is_null(self::$instance)) {
-            self::$instance = new self();
-        }
-        return self::$instance;
-    }
+	/**
+	 * Prevent cloning
+	 */
+	private function __clone() {}
 
-    /**
-     * Prevent cloning
-     */
-    private function __clone() {}
+	/**
+	 * Prevent unserialization
+	 */
+	public function __wakeup()
+	{
+		throw new \Exception("Cannot unserialize singleton");
+	}
 
-    /**
-     * Prevent unserialization
-     */
-    public function __wakeup() {
-        throw new \Exception('Cannot unserialize singleton');
-    }
+	/**
+	 * Constructor
+	 */
+	private function __construct()
+	{
+		// Only run on frontend
+		if (!GA4DT_Security::is_valid_frontend_request()) {
+			return;
+		}
 
-    /**
-     * Constructor
-     */
-    private function __construct() {
-        // Only run on frontend
-        if (!GA4DT_Security::is_valid_frontend_request()) {
-            return;
-        }
+		$this->init_hooks();
+	}
 
-        $this->init_hooks();
-    }
+	/**
+	 * Initialize hooks
+	 */
+	private function init_hooks()
+	{
+		// Data layer initialization (early in head)
+		add_action("wp_head", [$this, "init_data_layer"], 1);
 
-    /**
-     * Initialize hooks
-     */
-    private function init_hooks() {
-        // Data layer initialization (early in head)
-        add_action('wp_head', [$this, 'init_data_layer'], 1);
+		// Product data attributes
+		add_filter(
+			"woocommerce_loop_add_to_cart_link",
+			[$this, "add_product_data_attributes"],
+			10,
+			2,
+		);
+		add_filter("post_class", [$this, "add_product_classes"], 10, 3);
 
-        // Product data attributes
-        add_filter('woocommerce_loop_add_to_cart_link', [$this, 'add_product_data_attributes'], 10, 2);
-        add_filter('post_class', [$this, 'add_product_classes'], 10, 3);
+		// Footer scripts
+		add_action("wp_footer", [$this, "ultra_dynamic_tracking_script"], 5);
+		add_action("wp_footer", [$this, "single_product_view"], 10);
+		add_action("wp_footer", [$this, "single_product_data_script"], 10);
+		// Note: view_item_list is handled by JavaScript GA4UltraTracker to avoid duplicates
+		add_action("wp_footer", [$this, "track_payment_method"], 10);
+		add_action("wp_footer", [$this, "track_shipping_method"], 10);
+		add_action("wp_footer", [$this, "remove_from_cart_script"], 10);
+		add_action("wp_footer", [$this, "debug_helper"], 999);
 
-        // Footer scripts
-        add_action('wp_footer', [$this, 'ultra_dynamic_tracking_script'], 5);
-        add_action('wp_footer', [$this, 'single_product_view'], 10);
-        // Note: view_item_list is handled by JavaScript GA4UltraTracker to avoid duplicates
-        add_action('wp_footer', [$this, 'track_payment_method'], 10);
-        add_action('wp_footer', [$this, 'track_shipping_method'], 10);
-        add_action('wp_footer', [$this, 'remove_from_cart_script'], 10);
-        add_action('wp_footer', [$this, 'debug_helper'], 999);
+		// WooCommerce hooks
+		add_action("woocommerce_before_cart", [$this, "view_cart"]);
+		add_action("woocommerce_before_checkout_form", [
+			$this,
+			"begin_checkout",
+		]);
+		add_action("woocommerce_thankyou", [$this, "purchase_event"]);
+	}
 
-        // WooCommerce hooks
-        add_action('woocommerce_before_cart', [$this, 'view_cart']);
-        add_action('woocommerce_before_checkout_form', [$this, 'begin_checkout']);
-        add_action('woocommerce_thankyou', [$this, 'purchase_event']);
-    }
+	/**
+	 * Get product data with sale price support (secured)
+	 */
+	public function get_product_data($product, $quantity = 1, $index = 0)
+	{
+		if (!$product || !is_a($product, "WC_Product")) {
+			return null;
+		}
 
-    /**
-     * Get product data with sale price support (secured)
-     */
-    public function get_product_data($product, $quantity = 1, $index = 0) {
-        if (!$product || !is_a($product, 'WC_Product')) {
-            return null;
-        }
+		$categories = [];
+		$terms = get_the_terms($product->get_id(), "product_cat");
+		if ($terms && !is_wp_error($terms)) {
+			foreach ($terms as $term) {
+				$categories[] = GA4DT_Security::sanitize_category($term->name);
+			}
+		}
 
-        $categories = [];
-        $terms = get_the_terms($product->get_id(), 'product_cat');
-        if ($terms && !is_wp_error($terms)) {
-            foreach ($terms as $term) {
-                $categories[] = GA4DT_Security::sanitize_category($term->name);
-            }
-        }
+		// Get prices - handle sale price (always 2 decimal places)
+		$regular_price = floatval($product->get_regular_price());
+		$sale_price = floatval($product->get_sale_price());
+		$current_price = floatval($product->get_price());
 
-        // Get prices - handle sale price (always 2 decimal places)
-        $regular_price = floatval($product->get_regular_price());
-        $sale_price = floatval($product->get_sale_price());
-        $current_price = floatval($product->get_price());
+		// Determine if product is on sale
+		$is_on_sale = $product->is_on_sale();
 
-        // Determine if product is on sale
-        $is_on_sale = $product->is_on_sale();
+		// Calculate discount amount and percentage
+		$discount_amount = 0;
+		$discount_percentage = 0;
 
-        // Calculate discount amount and percentage
-        $discount_amount = 0;
-        $discount_percentage = 0;
+		if ($is_on_sale && $regular_price > 0 && $sale_price > 0) {
+			$discount_amount = $regular_price - $sale_price;
+			$discount_percentage = round(
+				($discount_amount / $regular_price) * 100,
+				2,
+			);
+		}
 
-        if ($is_on_sale && $regular_price > 0 && $sale_price > 0) {
-            $discount_amount = $regular_price - $sale_price;
-            $discount_percentage = round(($discount_amount / $regular_price) * 100, 2);
-        }
+		$sku = $product->get_sku();
+		$data = [
+			"item_id" => $sku
+				? GA4DT_Security::sanitize_sku($sku)
+				: (string) absint($product->get_id()),
+			"item_name" => GA4DT_Security::sanitize_product_name(
+				$product->get_name(),
+			),
+			"item_brand" => GA4DT_Security::sanitize_product_name(
+				get_bloginfo("name"),
+			),
+			"price" => number_format($current_price, 2, ".", ""),
+			"quantity" => GA4DT_Security::sanitize_quantity($quantity),
+		];
 
-        $sku = $product->get_sku();
-        $data = [
-            'item_id' => $sku ? GA4DT_Security::sanitize_sku($sku) : (string) absint($product->get_id()),
-            'item_name' => GA4DT_Security::sanitize_product_name($product->get_name()),
-            'item_brand' => GA4DT_Security::sanitize_product_name(get_bloginfo('name')),
-            'price' => number_format($current_price, 2, '.', ''),
-            'quantity' => GA4DT_Security::sanitize_quantity($quantity),
-        ];
+		// Add sale price information if product is on sale
+		if ($is_on_sale && $regular_price > 0) {
+			$data["item_original_price"] = number_format(
+				$regular_price,
+				2,
+				".",
+				"",
+			);
+			$data["discount"] = number_format($discount_amount, 2, ".", "");
+			$data["discount_percentage"] = number_format(
+				$discount_percentage,
+				2,
+				".",
+				"",
+			);
+			$data["item_on_sale"] = true;
+		} else {
+			$data["item_original_price"] = number_format(
+				$current_price,
+				2,
+				".",
+				"",
+			);
+			$data["item_on_sale"] = false;
+		}
 
-        // Add sale price information if product is on sale
-        if ($is_on_sale && $regular_price > 0) {
-            $data['item_original_price'] = number_format($regular_price, 2, '.', '');
-            $data['discount'] = number_format($discount_amount, 2, '.', '');
-            $data['discount_percentage'] = number_format($discount_percentage, 2, '.', '');
-            $data['item_on_sale'] = true;
-        } else {
-            $data['item_original_price'] = number_format($current_price, 2, '.', '');
-            $data['item_on_sale'] = false;
-        }
+		if (!empty($categories)) {
+			$data["item_category"] = $categories[0];
+			if (isset($categories[1])) {
+				$data["item_category2"] = $categories[1];
+			}
+			if (isset($categories[2])) {
+				$data["item_category3"] = $categories[2];
+			}
+		}
 
-        if (!empty($categories)) {
-            $data['item_category'] = $categories[0];
-            if (isset($categories[1])) {
-                $data['item_category2'] = $categories[1];
-            }
-            if (isset($categories[2])) {
-                $data['item_category3'] = $categories[2];
-            }
-        }
+		if ($index > 0) {
+			$data["index"] = absint($index);
+		}
 
-        if ($index > 0) {
-            $data['index'] = absint($index);
-        }
+		return $data;
+	}
 
-        return $data;
-    }
+	/**
+	 * Initialize data layer with user data (secured)
+	 */
+	public function init_data_layer()
+	{
+		$user_id = get_current_user_id();
 
-    /**
-     * Initialize data layer with user data (secured)
-     */
-    public function init_data_layer() {
-        $user_id = get_current_user_id();
+		// Determine user status
+		$user_status = "Guest";
+		if ($user_id > 0) {
+			$customer_orders = wc_get_orders([
+				"customer_id" => $user_id,
+				"status" => ["wc-completed", "wc-processing"],
+				"limit" => 1,
+			]);
+			$user_status = !empty($customer_orders) ? "Customer" : "Registered";
+		}
+		$user_status = GA4DT_Security::sanitize_user_status($user_status);
 
-        // Determine user status
-        $user_status = 'Guest';
-        if ($user_id > 0) {
-            $customer_orders = wc_get_orders([
-                'customer_id' => $user_id,
-                'status' => ['wc-completed', 'wc-processing'],
-                'limit' => 1,
-            ]);
-            $user_status = !empty($customer_orders) ? 'Customer' : 'Registered';
-        }
-        $user_status = GA4DT_Security::sanitize_user_status($user_status);
+		// Get first and last purchase dates
+		$first_purchase_date = "";
+		$last_purchase_date = "";
 
-        // Get first and last purchase dates
-        $first_purchase_date = '';
-        $last_purchase_date = '';
+		if ($user_id > 0) {
+			$all_orders = wc_get_orders([
+				"customer_id" => $user_id,
+				"status" => ["wc-completed", "wc-processing"],
+				"limit" => -1,
+				"orderby" => "date",
+				"order" => "ASC",
+			]);
 
-        if ($user_id > 0) {
-            $all_orders = wc_get_orders([
-                'customer_id' => $user_id,
-                'status' => ['wc-completed', 'wc-processing'],
-                'limit' => -1,
-                'orderby' => 'date',
-                'order' => 'ASC',
-            ]);
+			if (!empty($all_orders)) {
+				$first_order = reset($all_orders);
+				$last_order = end($all_orders);
+				$first_purchase_date = GA4DT_Security::sanitize_date(
+					$first_order->get_date_created()->format("Y-m-d"),
+				);
+				$last_purchase_date = GA4DT_Security::sanitize_date(
+					$last_order->get_date_created()->format("Y-m-d"),
+				);
+			}
+		}
 
-            if (!empty($all_orders)) {
-                $first_order = reset($all_orders);
-                $last_order = end($all_orders);
-                $first_purchase_date = GA4DT_Security::sanitize_date($first_order->get_date_created()->format('Y-m-d'));
-                $last_purchase_date = GA4DT_Security::sanitize_date($last_order->get_date_created()->format('Y-m-d'));
-            }
-        }
+		// Get first and last visit dates
+		$first_visit_date = "";
+		$last_visit_date = GA4DT_Security::sanitize_date(gmdate("Y-m-d"));
 
-        // Get first and last visit dates
-        $first_visit_date = '';
-        $last_visit_date = GA4DT_Security::sanitize_date(gmdate('Y-m-d'));
+		if ($user_id > 0) {
+			$first_visit_date = get_user_meta(
+				$user_id,
+				"_ga4_first_visit",
+				true,
+			);
+			if (empty($first_visit_date)) {
+				$first_visit_date = GA4DT_Security::sanitize_date(
+					gmdate("Y-m-d"),
+				);
+				update_user_meta(
+					$user_id,
+					"_ga4_first_visit",
+					$first_visit_date,
+				);
+			} else {
+				$first_visit_date = GA4DT_Security::sanitize_date(
+					$first_visit_date,
+				);
+			}
+			update_user_meta($user_id, "_ga4_last_visit", $last_visit_date);
+		} else {
+			$cookie_first_visit = GA4DT_Security::get_secure_cookie(
+				"ga4_first_visit",
+			);
+			if (empty($cookie_first_visit)) {
+				$first_visit_date = GA4DT_Security::sanitize_date(
+					gmdate("Y-m-d"),
+				);
+				GA4DT_Security::set_secure_cookie(
+					"ga4_first_visit",
+					$first_visit_date,
+				);
+			} else {
+				$first_visit_date = GA4DT_Security::sanitize_date(
+					$cookie_first_visit,
+				);
+			}
+			GA4DT_Security::set_secure_cookie(
+				"ga4_last_visit",
+				$last_visit_date,
+			);
+		}
 
-        if ($user_id > 0) {
-            $first_visit_date = get_user_meta($user_id, '_ga4_first_visit', true);
-            if (empty($first_visit_date)) {
-                $first_visit_date = GA4DT_Security::sanitize_date(gmdate('Y-m-d'));
-                update_user_meta($user_id, '_ga4_first_visit', $first_visit_date);
-            } else {
-                $first_visit_date = GA4DT_Security::sanitize_date($first_visit_date);
-            }
-            update_user_meta($user_id, '_ga4_last_visit', $last_visit_date);
-        } else {
-            $cookie_first_visit = GA4DT_Security::get_secure_cookie('ga4_first_visit');
-            if (empty($cookie_first_visit)) {
-                $first_visit_date = GA4DT_Security::sanitize_date(gmdate('Y-m-d'));
-                GA4DT_Security::set_secure_cookie('ga4_first_visit', $first_visit_date);
-            } else {
-                $first_visit_date = GA4DT_Security::sanitize_date($cookie_first_visit);
-            }
-            GA4DT_Security::set_secure_cookie('ga4_last_visit', $last_visit_date);
-        }
+		// Create hashed user ID for privacy compliance
+		$hashed_user_id =
+			$user_id > 0
+				? GA4DT_Security::hash_user_id($user_id)
+				: GA4DT_Security::hash_guest_id();
 
-        // Create hashed user ID for privacy compliance
-        $hashed_user_id = $user_id > 0 
-            ? GA4DT_Security::hash_user_id($user_id) 
-            : GA4DT_Security::hash_guest_id();
+		// Determine page type
+		$page_type = "other";
+		if (function_exists("is_product") && is_product()) {
+			$page_type = "product";
+		} elseif (
+			function_exists("is_product_category") &&
+			is_product_category()
+		) {
+			$page_type = "category";
+		} elseif (function_exists("is_shop") && is_shop()) {
+			$page_type = "shop";
+		} elseif (function_exists("is_cart") && is_cart()) {
+			$page_type = "cart";
+		} elseif (function_exists("is_checkout") && is_checkout()) {
+			$page_type = "checkout";
+		} elseif (
+			function_exists("is_order_received_page") &&
+			is_order_received_page()
+		) {
+			$page_type = "purchase";
+		}
 
-        // Determine page type
-        $page_type = 'other';
-        if (function_exists('is_product') && is_product()) {
-            $page_type = 'product';
-        } elseif (function_exists('is_product_category') && is_product_category()) {
-            $page_type = 'category';
-        } elseif (function_exists('is_shop') && is_shop()) {
-            $page_type = 'shop';
-        } elseif (function_exists('is_cart') && is_cart()) {
-            $page_type = 'cart';
-        } elseif (function_exists('is_checkout') && is_checkout()) {
-            $page_type = 'checkout';
-        } elseif (function_exists('is_order_received_page') && is_order_received_page()) {
-            $page_type = 'purchase';
-        }
+		$currency = GA4DT_Security::sanitize_currency(
+			get_woocommerce_currency(),
+		);
+		$is_debug = defined("WP_DEBUG") && WP_DEBUG;
 
-        $currency = GA4DT_Security::sanitize_currency(get_woocommerce_currency());
-        $is_debug = defined('WP_DEBUG') && WP_DEBUG;
+		// Build page data
+		$page_data = [
+			"pageType" => esc_js($page_type),
+			"currency" => esc_js($currency),
+			"userStatus" => esc_js($user_status),
+			"hashedUserId" => esc_js($hashed_user_id),
+			"siteName" => esc_js(get_bloginfo("name")),
+		];
 
-        // Build page data
-        $page_data = [
-            'pageType' => esc_js($page_type),
-            'currency' => esc_js($currency),
-            'userStatus' => esc_js($user_status),
-            'hashedUserId' => esc_js($hashed_user_id),
-        ];
+		if (is_product_category()) {
+			$page_data["categoryName"] = esc_js(single_cat_title("", false));
+			$page_data["categoryId"] = absint(get_queried_object_id());
+		}
 
-        if (is_product_category()) {
-            $page_data['categoryName'] = esc_js(single_cat_title('', false));
-            $page_data['categoryId'] = absint(get_queried_object_id());
-        }
-
-        if (is_product()) {
-            $page_data['productId'] = absint(get_the_ID());
-        }
-        ?>
+		if (is_product()) {
+			$page_data["productId"] = absint(get_the_ID());
+		}
+		?>
         <script>
         window.dataLayer = window.dataLayer || [];
 
         dataLayer.push({
             event: 'pageview',
             user_status: '<?php echo esc_js($user_status); ?>',
-            user_type: '<?php echo $user_id > 0 ? 'Logged In' : 'Guest'; ?>',
+            user_type: '<?php echo $user_id > 0 ? "Logged In" : "Guest"; ?>',
             <?php if (!empty($first_purchase_date)): ?>
             first_purchase_date: '<?php echo esc_js($first_purchase_date); ?>',
             <?php endif; ?>
@@ -273,7 +350,7 @@ class GA4DT_Tracker {
 
         window.ga4Config = {
             currency: '<?php echo esc_js($currency); ?>',
-            debug: <?php echo $is_debug ? 'true' : 'false'; ?>,
+            debug: <?php echo $is_debug ? "true" : "false"; ?>,
             trackingEnabled: true,
             autoTrackImpressions: true,
             impressionThreshold: 0.5,
@@ -284,57 +361,91 @@ class GA4DT_Tracker {
         window.ga4PageData = <?php echo wp_json_encode($page_data); ?>;
         </script>
         <?php
-    }
+	}
 
-    /**
-     * Add product data attributes to add to cart links (secured)
-     */
-    public function add_product_data_attributes($html, $product) {
-        if (!$product || !is_a($product, 'WC_Product')) {
-            return $html;
-        }
+	/**
+	 * Output single product data for JavaScript (secured)
+	 */
+	public function single_product_data_script()
+	{
+		if (!is_product()) {
+			return;
+		}
 
-        $product_data = $this->get_product_data($product);
+		global $product;
+		if (!$product || !is_a($product, "WC_Product")) {
+			return;
+		}
 
-        if (!$product_data) {
-            return $html;
-        }
+		$product_data = $this->get_product_data($product);
+		if (!$product_data) {
+			return;
+		}
+		?>
+        <script>
+        window.ga4SingleProduct = <?php echo GA4DT_Security::json_encode_safe(
+        	$product_data,
+        ); ?>;
+        </script>
+        <?php
+	}
 
-        $data_attrs = sprintf(
-            'data-ga4-id="%s" data-ga4-name="%s" data-ga4-price="%s" data-ga4-original-price="%s" data-ga4-on-sale="%s" data-ga4-category="%s"',
-            esc_attr($product_data['item_id']),
-            esc_attr($product_data['item_name']),
-            esc_attr($product_data['price']),
-            esc_attr($product_data['item_original_price']),
-            esc_attr($product_data['item_on_sale'] ? 'true' : 'false'),
-            esc_attr(isset($product_data['item_category']) ? $product_data['item_category'] : '')
-        );
+	/**
+	 * Add product data attributes to add to cart links (secured)
+	 */
+	public function add_product_data_attributes($html, $product)
+	{
+		if (!$product || !is_a($product, "WC_Product")) {
+			return $html;
+		}
 
-        $html = str_replace('class="', $data_attrs . ' class="', $html);
+		$product_data = $this->get_product_data($product);
 
-        return $html;
-    }
+		if (!$product_data) {
+			return $html;
+		}
 
-    /**
-     * Add tracking classes to products
-     */
-    public function add_product_classes($classes, $class, $post_id) {
-        $post_id = absint($post_id);
-        
-        if (get_post_type($post_id) !== 'product') {
-            return $classes;
-        }
+		$data_attrs = sprintf(
+			'data-ga4-id="%s" data-ga4-name="%s" data-ga4-price="%s" data-ga4-original-price="%s" data-ga4-on-sale="%s" data-ga4-category="%s"',
+			esc_attr($product_data["item_id"]),
+			esc_attr($product_data["item_name"]),
+			esc_attr($product_data["price"]),
+			esc_attr($product_data["item_original_price"]),
+			esc_attr($product_data["item_on_sale"] ? "true" : "false"),
+			esc_attr(
+				isset($product_data["item_category"])
+					? $product_data["item_category"]
+					: "",
+			),
+		);
 
-        $classes[] = 'ga4-trackable-product';
+		$html = str_replace('class="', $data_attrs . ' class="', $html);
 
-        return $classes;
-    }
+		return $html;
+	}
 
-    /**
-     * Ultra dynamic tracking script (secured)
-     */
-    public function ultra_dynamic_tracking_script() {
-        ?>
+	/**
+	 * Add tracking classes to products
+	 */
+	public function add_product_classes($classes, $class, $post_id)
+	{
+		$post_id = absint($post_id);
+
+		if (get_post_type($post_id) !== "product") {
+			return $classes;
+		}
+
+		$classes[] = "ga4-trackable-product";
+
+		return $classes;
+	}
+
+	/**
+	 * Ultra dynamic tracking script (secured)
+	 */
+	public function ultra_dynamic_tracking_script()
+	{
+		?>
         <script>
         (function() {
             'use strict';
@@ -640,7 +751,7 @@ class GA4DT_Tracker {
                     if (this.pageData.pageType === 'shop') {
                         return 'Shop';
                     }
-                    
+
                     if (this.pageData.pageType === 'category' && this.pageData.categoryName) {
                         return this.sanitizeString(this.pageData.categoryName);
                     }
@@ -656,7 +767,7 @@ class GA4DT_Tracker {
                             '.elementor-widget-heading .elementor-heading-title, ' +
                             'h2.section-title, h3.section-title'
                         );
-                        
+
                         if (headingEl && headingEl.textContent.trim()) {
                             // Make sure it's not a product title
                             const isProductTitle = headingEl.closest('li.product, .product-item, .kitify-product, .elementor-post, .e-loop-item');
@@ -712,7 +823,7 @@ class GA4DT_Tracker {
                 // Get event name based on page type
                 getItemListEventName: function() {
                     const pageType = this.pageData.pageType || 'other';
-                    
+
                     switch (pageType) {
                         case 'shop':
                             return 'view_item_list';
@@ -789,12 +900,13 @@ class GA4DT_Tracker {
                 },
 
                 trackAddToCart: function() {
-                    const self = this;
+                    var self = this;
 
+                    // Handle AJAX add to cart (product listing pages)
                     if (typeof jQuery !== 'undefined') {
                         jQuery(document.body).on('added_to_cart', function(e, fragments, cart_hash, button) {
-                            const productData = self.getProductData(button[0]);
-                            const quantity = parseInt(button.data('quantity')) || 1;
+                            var productData = self.getProductData(button[0]);
+                            var quantity = parseInt(button.data('quantity')) || 1;
 
                             if (productData) {
                                 productData.quantity = quantity;
@@ -810,14 +922,16 @@ class GA4DT_Tracker {
                         });
                     }
 
-                    const singleAddToCart = document.querySelector('form.cart button[type="submit"]');
+                    // Handle single product page add to cart
+                    var singleAddToCart = document.querySelector('form.cart button[type="submit"]');
                     if (singleAddToCart) {
                         singleAddToCart.addEventListener('click', function() {
-                            const form = this.closest('form.cart');
-                            const quantityInput = form ? form.querySelector('input.qty, input[name="quantity"]') : null;
-                            const quantity = quantityInput ? parseInt(quantityInput.value) || 1 : 1;
+                            var form = this.closest('form.cart');
+                            var quantityInput = form ? form.querySelector('input.qty, input[name="quantity"]') : null;
+                            var quantity = quantityInput ? parseInt(quantityInput.value) || 1 : 1;
 
-                            const productData = self.getProductData(document.body, true);
+                            // Get product data from server-rendered single product data
+                            var productData = self.getSingleProductData();
 
                             if (productData) {
                                 setTimeout(function() {
@@ -834,6 +948,89 @@ class GA4DT_Tracker {
                             }
                         });
                     }
+                },
+
+                // Get product data specifically for single product page
+                getSingleProductData: function() {
+                    // Use server-rendered product data first (most reliable)
+                    if (window.ga4SingleProduct) {
+                        // Return a copy to avoid mutation
+                        return Object.assign({}, window.ga4SingleProduct);
+                    }
+
+                    // Fallback: Extract from DOM on single product page
+                    var productName = '';
+                    var productId = '';
+                    var sku = '';
+                    var currentPrice = 0;
+                    var originalPrice = 0;
+                    var isOnSale = false;
+                    var category = '';
+
+                    // Get product name from title
+                    var titleEl = document.querySelector('.product_title, h1.entry-title');
+                    if (titleEl) {
+                        productName = this.sanitizeString(titleEl.textContent.trim());
+                    }
+
+                    // Get product ID from body class or form
+                    var bodyClass = document.body.className;
+                    var idMatch = bodyClass.match(/postid-(\d+)/);
+                    if (idMatch) {
+                        productId = idMatch[1];
+                    }
+
+                    // Get SKU from product meta
+                    var skuEl = document.querySelector('.sku, .product_meta .sku');
+                    if (skuEl) {
+                        sku = this.sanitizeString(skuEl.textContent.trim());
+                    }
+
+                    // Get price from single product price display
+                    var priceContainer = document.querySelector('.summary .price, .product .price, .elementor-widget-woocommerce-product-price .price');
+                    if (priceContainer) {
+                        var salePriceEl = priceContainer.querySelector('ins .woocommerce-Price-amount bdi');
+                        var regularPriceEl = priceContainer.querySelector('del .woocommerce-Price-amount bdi');
+
+                        if (salePriceEl && regularPriceEl) {
+                            isOnSale = true;
+                            currentPrice = this.sanitizeNumber(salePriceEl.textContent.replace(/[^0-9.]/g, ''));
+                            originalPrice = this.sanitizeNumber(regularPriceEl.textContent.replace(/[^0-9.]/g, ''));
+                        } else {
+                            var normalPriceEl = priceContainer.querySelector('.woocommerce-Price-amount bdi');
+                            if (normalPriceEl) {
+                                currentPrice = this.sanitizeNumber(normalPriceEl.textContent.replace(/[^0-9.]/g, ''));
+                                originalPrice = currentPrice;
+                            }
+                        }
+                    }
+
+                    // Get category
+                    var categoryEl = document.querySelector('.posted_in a, .product_meta .posted_in a');
+                    if (categoryEl) {
+                        category = this.sanitizeString(categoryEl.textContent.trim());
+                    }
+
+                    if (!productId && !productName) {
+                        return null;
+                    }
+
+                    var productData = {
+                        item_id: this.sanitizeString(String(sku || productId)),
+                        item_name: productName || 'Unknown Product',
+                        item_brand: this.sanitizeString(this.pageData.siteName || ''),
+                        price: currentPrice,
+                        item_original_price: originalPrice,
+                        item_on_sale: isOnSale,
+                        item_category: category
+                    };
+
+                    if (isOnSale && parseFloat(originalPrice) > parseFloat(currentPrice)) {
+                        productData.discount = (parseFloat(originalPrice) - parseFloat(currentPrice)).toFixed(2);
+                        productData.discount_percentage = (((parseFloat(originalPrice) - parseFloat(currentPrice)) / parseFloat(originalPrice)) * 100).toFixed(2);
+                    }
+
+                    return productData;
                 },
 
                 observeDynamicContent: function() {
@@ -908,113 +1105,124 @@ class GA4DT_Tracker {
         })();
         </script>
         <?php
-    }
+	}
 
-    /**
-     * Single product view event (secured)
-     */
-    public function single_product_view() {
-        if (!is_product()) {
-            return;
-        }
+	/**
+	 * Single product view event (secured)
+	 */
+	public function single_product_view()
+	{
+		if (!is_product()) {
+			return;
+		}
 
-        global $product;
-        if (!$product || !is_a($product, 'WC_Product')) {
-            return;
-        }
+		global $product;
+		if (!$product || !is_a($product, "WC_Product")) {
+			return;
+		}
 
-        $product_data = $this->get_product_data($product);
-        if (!$product_data) {
-            return;
-        }
+		$product_data = $this->get_product_data($product);
+		if (!$product_data) {
+			return;
+		}
 
-        $currency = GA4DT_Security::sanitize_currency(get_woocommerce_currency());
-        ?>
+		$currency = GA4DT_Security::sanitize_currency(
+			get_woocommerce_currency(),
+		);
+		?>
         <script>
         dataLayer.push({ ecommerce: null });
         dataLayer.push({
             event: 'view_item',
             ecommerce: {
                 currency: '<?php echo esc_js($currency); ?>',
-                value: <?php echo number_format(floatval($product_data['price']), 2, '.', ''); ?>,
-                items: [<?php echo GA4DT_Security::json_encode_safe($product_data); ?>]
+                value: <?php echo number_format(
+                	floatval($product_data["price"]),
+                	2,
+                	".",
+                	"",
+                ); ?>,
+                items: [<?php echo GA4DT_Security::json_encode_safe(
+                	$product_data,
+                ); ?>]
             }
         });
         </script>
         <?php
-    }
+	}
 
-    /**
-     * View item list event (secured)
-     * Note: This function is kept as a fallback but NOT hooked by default.
-     * The JavaScript GA4UltraTracker handles view_item_list dynamically to prevent duplicates.
-     * Enable this only if you need server-side tracking without JavaScript.
-     */
-    public function view_item_list() {
-        if (!is_shop() && !is_product_category() && !is_product_tag()) {
-            return;
-        }
+	/**
+	 * View item list event (secured)
+	 * Note: This function is kept as a fallback but NOT hooked by default.
+	 * The JavaScript GA4UltraTracker handles view_item_list dynamically to prevent duplicates.
+	 * Enable this only if you need server-side tracking without JavaScript.
+	 */
+	public function view_item_list()
+	{
+		if (!is_shop() && !is_product_category() && !is_product_tag()) {
+			return;
+		}
 
-        global $wp_query;
+		global $wp_query;
 
-        $items = [];
-        $position = 1;
-        $original_query = $wp_query;
+		$items = [];
+		$position = 1;
+		$original_query = $wp_query;
 
-        if ($wp_query->have_posts()) {
-            while ($wp_query->have_posts()) {
-                $wp_query->the_post();
-                global $product;
+		if ($wp_query->have_posts()) {
+			while ($wp_query->have_posts()) {
+				$wp_query->the_post();
+				global $product;
 
-                if (!$product || !is_a($product, 'WC_Product')) {
-                    continue;
-                }
+				if (!$product || !is_a($product, "WC_Product")) {
+					continue;
+				}
 
-                $product_data = $this->get_product_data($product, 1, $position);
-                if ($product_data) {
-                    $items[] = $product_data;
-                    $position++;
-                }
+				$product_data = $this->get_product_data($product, 1, $position);
+				if ($product_data) {
+					$items[] = $product_data;
+					$position++;
+				}
 
-                // Limit to prevent excessive data
-                if ($position > 100) {
-                    break;
-                }
-            }
-            wp_reset_postdata();
-        }
+				// Limit to prevent excessive data
+				if ($position > 100) {
+					break;
+				}
+			}
+			wp_reset_postdata();
+		}
 
-        $wp_query = $original_query;
+		$wp_query = $original_query;
 
-        if (empty($items)) {
-            return;
-        }
+		if (empty($items)) {
+			return;
+		}
 
-        $list_id = 'shop_page';
-        $list_name = 'Shop';
+		$list_id = "shop_page";
+		$list_name = "Shop";
 
-        if (is_product_category()) {
-            $category = get_queried_object();
-            if ($category && isset($category->term_id)) {
-                $list_id = 'category_' . absint($category->term_id);
-                $list_name = GA4DT_Security::sanitize_category($category->name);
-            }
-        } elseif (is_product_tag()) {
-            $tag = get_queried_object();
-            if ($tag && isset($tag->term_id)) {
-                $list_id = 'tag_' . absint($tag->term_id);
-                $list_name = GA4DT_Security::sanitize_category($tag->name);
-            }
-        }
+		if (is_product_category()) {
+			$category = get_queried_object();
+			if ($category && isset($category->term_id)) {
+				$list_id = "category_" . absint($category->term_id);
+				$list_name = GA4DT_Security::sanitize_category($category->name);
+			}
+		} elseif (is_product_tag()) {
+			$tag = get_queried_object();
+			if ($tag && isset($tag->term_id)) {
+				$list_id = "tag_" . absint($tag->term_id);
+				$list_name = GA4DT_Security::sanitize_category($tag->name);
+			}
+		}
 
-        // Determine event name based on page type
-        $event_name = 'view_item_list'; // default for shop
-        if (is_product_category()) {
-            $event_name = 'view_category_item_list';
-        } elseif (is_product_tag()) {
-            $event_name = 'view_tag_item_list';
-        }
-        ?>
+		// Determine event name based on page type
+		$event_name = "view_item_list"; // default for shop
+		if (is_product_category()) {
+			$event_name = "view_category_item_list";
+		} elseif (is_product_tag()) {
+			$event_name = "view_tag_item_list";
+		}
+		?>
         <script>
         dataLayer.push({ ecommerce: null });
         dataLayer.push({
@@ -1027,125 +1235,164 @@ class GA4DT_Tracker {
         });
         </script>
         <?php
-    }
+	}
 
-    /**
-     * View cart event (secured)
-     */
-    public function view_cart() {
-        $cart = WC()->cart;
-        if (!$cart || $cart->is_empty()) {
-            return;
-        }
+	/**
+	 * View cart event (secured)
+	 */
+	public function view_cart()
+	{
+		$cart = WC()->cart;
+		if (!$cart || $cart->is_empty()) {
+			return;
+		}
 
-        $items = [];
-        foreach ($cart->get_cart() as $cart_item) {
-            $product = $cart_item['data'];
-            if (!$product || !is_a($product, 'WC_Product')) {
-                continue;
-            }
-            $product_data = $this->get_product_data($product, $cart_item['quantity']);
-            if ($product_data) {
-                $items[] = $product_data;
-            }
-        }
+		$items = [];
+		foreach ($cart->get_cart() as $cart_item) {
+			$product = $cart_item["data"];
+			if (!$product || !is_a($product, "WC_Product")) {
+				continue;
+			}
+			$product_data = $this->get_product_data(
+				$product,
+				$cart_item["quantity"],
+			);
+			if ($product_data) {
+				$items[] = $product_data;
+			}
+		}
 
-        if (empty($items)) {
-            return;
-        }
+		if (empty($items)) {
+			return;
+		}
 
-        $currency = GA4DT_Security::sanitize_currency(get_woocommerce_currency());
-        $cart_total = GA4DT_Security::sanitize_price($cart->get_cart_contents_total());
-        ?>
+		$currency = GA4DT_Security::sanitize_currency(
+			get_woocommerce_currency(),
+		);
+		$cart_total = GA4DT_Security::sanitize_price(
+			$cart->get_cart_contents_total(),
+		);
+		?>
         <script>
         dataLayer.push({ ecommerce: null });
         dataLayer.push({
             event: 'view_cart',
             ecommerce: {
                 currency: '<?php echo esc_js($currency); ?>',
-                value: <?php echo number_format(floatval($cart_total), 2, '.', ''); ?>,
+                value: <?php echo number_format(
+                	floatval($cart_total),
+                	2,
+                	".",
+                	"",
+                ); ?>,
                 items: <?php echo GA4DT_Security::json_encode_safe($items); ?>
             }
         });
         </script>
         <?php
-    }
+	}
 
-    /**
-     * Begin checkout event (secured)
-     */
-    public function begin_checkout() {
-        $cart = WC()->cart;
-        if (!$cart || $cart->is_empty()) {
-            return;
-        }
+	/**
+	 * Begin checkout event (secured)
+	 */
+	public function begin_checkout()
+	{
+		$cart = WC()->cart;
+		if (!$cart || $cart->is_empty()) {
+			return;
+		}
 
-        $items = [];
-        foreach ($cart->get_cart() as $cart_item) {
-            $product = $cart_item['data'];
-            if (!$product || !is_a($product, 'WC_Product')) {
-                continue;
-            }
-            $product_data = $this->get_product_data($product, $cart_item['quantity']);
-            if ($product_data) {
-                $items[] = $product_data;
-            }
-        }
+		$items = [];
+		foreach ($cart->get_cart() as $cart_item) {
+			$product = $cart_item["data"];
+			if (!$product || !is_a($product, "WC_Product")) {
+				continue;
+			}
+			$product_data = $this->get_product_data(
+				$product,
+				$cart_item["quantity"],
+			);
+			if ($product_data) {
+				$items[] = $product_data;
+			}
+		}
 
-        if (empty($items)) {
-            return;
-        }
+		if (empty($items)) {
+			return;
+		}
 
-        $currency = GA4DT_Security::sanitize_currency(get_woocommerce_currency());
-        $cart_total = GA4DT_Security::sanitize_price($cart->get_cart_contents_total());
-        ?>
+		$currency = GA4DT_Security::sanitize_currency(
+			get_woocommerce_currency(),
+		);
+		$cart_total = GA4DT_Security::sanitize_price(
+			$cart->get_cart_contents_total(),
+		);
+		?>
         <script>
         dataLayer.push({ ecommerce: null });
         dataLayer.push({
             event: 'begin_checkout',
             ecommerce: {
                 currency: '<?php echo esc_js($currency); ?>',
-                value: <?php echo number_format(floatval($cart_total), 2, '.', ''); ?>,
+                value: <?php echo number_format(
+                	floatval($cart_total),
+                	2,
+                	".",
+                	"",
+                ); ?>,
                 items: <?php echo GA4DT_Security::json_encode_safe($items); ?>
             }
         });
         </script>
         <?php
-    }
+	}
 
-    /**
-     * Track payment method selection (secured)
-     */
-    public function track_payment_method() {
-        if (!is_checkout()) {
-            return;
-        }
+	/**
+	 * Track payment method selection (secured)
+	 */
+	public function track_payment_method()
+	{
+		if (!is_checkout()) {
+			return;
+		}
 
-        $cart = WC()->cart;
-        if (!$cart || $cart->is_empty()) {
-            return;
-        }
+		$cart = WC()->cart;
+		if (!$cart || $cart->is_empty()) {
+			return;
+		}
 
-        $items = [];
-        foreach ($cart->get_cart() as $cart_item) {
-            $product = $cart_item['data'];
-            if (!$product || !is_a($product, 'WC_Product')) {
-                continue;
-            }
-            $product_data = $this->get_product_data($product, $cart_item['quantity']);
-            if ($product_data) {
-                $items[] = $product_data;
-            }
-        }
+		$items = [];
+		foreach ($cart->get_cart() as $cart_item) {
+			$product = $cart_item["data"];
+			if (!$product || !is_a($product, "WC_Product")) {
+				continue;
+			}
+			$product_data = $this->get_product_data(
+				$product,
+				$cart_item["quantity"],
+			);
+			if ($product_data) {
+				$items[] = $product_data;
+			}
+		}
 
-        $currency = GA4DT_Security::sanitize_currency(get_woocommerce_currency());
-        $cart_total = GA4DT_Security::sanitize_price($cart->get_cart_contents_total());
-        $items_json = GA4DT_Security::json_encode_safe($items);
-        ?>
+		$currency = GA4DT_Security::sanitize_currency(
+			get_woocommerce_currency(),
+		);
+		$cart_total = GA4DT_Security::sanitize_price(
+			$cart->get_cart_contents_total(),
+		);
+		$items_json = GA4DT_Security::json_encode_safe($items);
+		?>
         <script>
         jQuery(document).ready(function($) {
             var ga4PaymentItems = <?php echo $items_json; ?>;
-            var ga4CartValue = '<?php echo number_format(floatval($cart_total), 2, '.', ''); ?>';
+            var ga4CartValue = '<?php echo number_format(
+            	floatval($cart_total),
+            	2,
+            	".",
+            	"",
+            ); ?>';
             var ga4Currency = '<?php echo esc_js($currency); ?>';
             var paymentTracked = {};
 
@@ -1212,41 +1459,54 @@ class GA4DT_Tracker {
         });
         </script>
         <?php
-    }
+	}
 
-    /**
-     * Track shipping method selection (secured)
-     */
-    public function track_shipping_method() {
-        if (!is_checkout()) {
-            return;
-        }
+	/**
+	 * Track shipping method selection (secured)
+	 */
+	public function track_shipping_method()
+	{
+		if (!is_checkout()) {
+			return;
+		}
 
-        $cart = WC()->cart;
-        if (!$cart || $cart->is_empty()) {
-            return;
-        }
+		$cart = WC()->cart;
+		if (!$cart || $cart->is_empty()) {
+			return;
+		}
 
-        $items = [];
-        foreach ($cart->get_cart() as $cart_item) {
-            $product = $cart_item['data'];
-            if (!$product || !is_a($product, 'WC_Product')) {
-                continue;
-            }
-            $product_data = $this->get_product_data($product, $cart_item['quantity']);
-            if ($product_data) {
-                $items[] = $product_data;
-            }
-        }
+		$items = [];
+		foreach ($cart->get_cart() as $cart_item) {
+			$product = $cart_item["data"];
+			if (!$product || !is_a($product, "WC_Product")) {
+				continue;
+			}
+			$product_data = $this->get_product_data(
+				$product,
+				$cart_item["quantity"],
+			);
+			if ($product_data) {
+				$items[] = $product_data;
+			}
+		}
 
-        $currency = GA4DT_Security::sanitize_currency(get_woocommerce_currency());
-        $cart_total = GA4DT_Security::sanitize_price($cart->get_cart_contents_total());
-        $items_json = GA4DT_Security::json_encode_safe($items);
-        ?>
+		$currency = GA4DT_Security::sanitize_currency(
+			get_woocommerce_currency(),
+		);
+		$cart_total = GA4DT_Security::sanitize_price(
+			$cart->get_cart_contents_total(),
+		);
+		$items_json = GA4DT_Security::json_encode_safe($items);
+		?>
         <script>
         jQuery(document).ready(function($) {
             var ga4ShippingItems = <?php echo $items_json; ?>;
-            var ga4CartValue = '<?php echo number_format(floatval($cart_total), 2, '.', ''); ?>';
+            var ga4CartValue = '<?php echo number_format(
+            	floatval($cart_total),
+            	2,
+            	".",
+            	"",
+            ); ?>';
             var ga4Currency = '<?php echo esc_js($currency); ?>';
             var shippingTracked = {};
 
@@ -1298,113 +1558,140 @@ class GA4DT_Tracker {
         });
         </script>
         <?php
-    }
+	}
 
-    /**
-     * Purchase event (secured)
-     */
-    public function purchase_event($order_id) {
-        $order_id = GA4DT_Security::sanitize_order_id($order_id);
-        
-        if (!$order_id) {
-            return;
-        }
+	/**
+	 * Purchase event (secured)
+	 */
+	public function purchase_event($order_id)
+	{
+		$order_id = GA4DT_Security::sanitize_order_id($order_id);
 
-        // Prevent duplicate tracking
-        if (get_post_meta($order_id, '_ga4_tracked', true)) {
-            return;
-        }
-        update_post_meta($order_id, '_ga4_tracked', '1');
+		if (!$order_id) {
+			return;
+		}
 
-        $order = GA4DT_Security::validate_order($order_id);
-        if (!$order) {
-            return;
-        }
+		// Prevent duplicate tracking
+		if (get_post_meta($order_id, "_ga4_tracked", true)) {
+			return;
+		}
+		update_post_meta($order_id, "_ga4_tracked", "1");
 
-        $items = [];
-        $total_discount = 0;
+		$order = GA4DT_Security::validate_order($order_id);
+		if (!$order) {
+			return;
+		}
 
-        foreach ($order->get_items() as $item) {
-            $product = $item->get_product();
-            if (!$product || !is_a($product, 'WC_Product')) {
-                continue;
-            }
+		$items = [];
+		$total_discount = 0;
 
-            $product_data = $this->get_product_data($product, $item->get_quantity());
-            $product_data['price'] = GA4DT_Security::sanitize_price($order->get_item_total($item, false));
+		foreach ($order->get_items() as $item) {
+			$product = $item->get_product();
+			if (!$product || !is_a($product, "WC_Product")) {
+				continue;
+			}
 
-            if (isset($product_data['discount'])) {
-                $total_discount += $product_data['discount'] * $item->get_quantity();
-            }
+			$product_data = $this->get_product_data(
+				$product,
+				$item->get_quantity(),
+			);
+			$product_data["price"] = GA4DT_Security::sanitize_price(
+				$order->get_item_total($item, false),
+			);
 
-            if ($product_data) {
-                $items[] = $product_data;
-            }
-        }
+			if (isset($product_data["discount"])) {
+				$total_discount +=
+					$product_data["discount"] * $item->get_quantity();
+			}
 
-        if (empty($items)) {
-            return;
-        }
+			if ($product_data) {
+				$items[] = $product_data;
+			}
+		}
 
-        $payment_method = GA4DT_Security::sanitize_payment_method($order->get_payment_method());
-        $payment_method_title = GA4DT_Security::sanitize_payment_title($order->get_payment_method_title());
+		if (empty($items)) {
+			return;
+		}
 
-        $shipping_methods = $order->get_shipping_methods();
-        $shipping_method_title = '';
-        if (!empty($shipping_methods)) {
-            $first_shipping = reset($shipping_methods);
-            $shipping_method_title = GA4DT_Security::sanitize_payment_title($first_shipping->get_method_title());
-        }
+		$payment_method = GA4DT_Security::sanitize_payment_method(
+			$order->get_payment_method(),
+		);
+		$payment_method_title = GA4DT_Security::sanitize_payment_title(
+			$order->get_payment_method_title(),
+		);
 
-        $coupons = array_map('sanitize_text_field', $order->get_coupon_codes());
-        $coupon_discount = GA4DT_Security::sanitize_price($order->get_discount_total());
-        $currency = GA4DT_Security::sanitize_currency($order->get_currency());
+		$shipping_methods = $order->get_shipping_methods();
+		$shipping_method_title = "";
+		if (!empty($shipping_methods)) {
+			$first_shipping = reset($shipping_methods);
+			$shipping_method_title = GA4DT_Security::sanitize_payment_title(
+				$first_shipping->get_method_title(),
+			);
+		}
 
-        $order_data = [
-            'transaction_id' => sanitize_text_field($order->get_order_number()),
-            'value' => GA4DT_Security::sanitize_price($order->get_total()),
-            'tax' => GA4DT_Security::sanitize_price($order->get_total_tax()),
-            'shipping' => GA4DT_Security::sanitize_price($order->get_shipping_total()),
-            'currency' => $currency,
-            'payment_type' => $payment_method_title,
-            'payment_method' => $payment_method,
-        ];
+		$coupons = array_map("sanitize_text_field", $order->get_coupon_codes());
+		$coupon_discount = GA4DT_Security::sanitize_price(
+			$order->get_discount_total(),
+		);
+		$currency = GA4DT_Security::sanitize_currency($order->get_currency());
 
-        if ($shipping_method_title) {
-            $order_data['shipping_tier'] = $shipping_method_title;
-        }
+		$order_data = [
+			"transaction_id" => sanitize_text_field($order->get_order_number()),
+			"value" => GA4DT_Security::sanitize_price($order->get_total()),
+			"tax" => GA4DT_Security::sanitize_price($order->get_total_tax()),
+			"shipping" => GA4DT_Security::sanitize_price(
+				$order->get_shipping_total(),
+			),
+			"currency" => $currency,
+			"payment_type" => $payment_method_title,
+			"payment_method" => $payment_method,
+		];
 
-        if (!empty($coupons)) {
-            $order_data['coupon'] = implode(', ', $coupons);
-            $order_data['coupon_discount'] = $coupon_discount;
-        }
+		if ($shipping_method_title) {
+			$order_data["shipping_tier"] = $shipping_method_title;
+		}
 
-        if ($total_discount > 0) {
-            $order_data['sale_discount'] = number_format($total_discount, 2, '.', '');
-        }
+		if (!empty($coupons)) {
+			$order_data["coupon"] = implode(", ", $coupons);
+			$order_data["coupon_discount"] = $coupon_discount;
+		}
 
-        $order_data['items'] = $items;
-        ?>
+		if ($total_discount > 0) {
+			$order_data["sale_discount"] = number_format(
+				$total_discount,
+				2,
+				".",
+				"",
+			);
+		}
+
+		$order_data["items"] = $items;
+		?>
         <script>
         dataLayer.push({ ecommerce: null });
         dataLayer.push({
             event: 'purchase',
-            ecommerce: <?php echo GA4DT_Security::json_encode_safe($order_data); ?>
+            ecommerce: <?php echo GA4DT_Security::json_encode_safe(
+            	$order_data,
+            ); ?>
         });
         </script>
         <?php
-    }
+	}
 
-    /**
-     * Remove from cart script (secured)
-     */
-    public function remove_from_cart_script() {
-        if (!is_cart()) {
-            return;
-        }
+	/**
+	 * Remove from cart script (secured)
+	 */
+	public function remove_from_cart_script()
+	{
+		if (!is_cart()) {
+			return;
+		}
 
-        $currency = GA4DT_Security::sanitize_currency(get_woocommerce_currency());
-        ?>
+		$currency = GA4DT_Security::sanitize_currency(
+			get_woocommerce_currency(),
+		);
+		?>
         <script>
         jQuery(document).ready(function($) {
             function sanitizeNumber(num) {
@@ -1469,16 +1756,16 @@ class GA4DT_Tracker {
         });
         </script>
         <?php
-    }
+	}
 
-    /**
-     * Debug helper (secured)
-     */
-    public function debug_helper() {
-        if (!defined('WP_DEBUG') || !WP_DEBUG) {
-            return;
-        }
-        ?>
+	/**
+	 * Debug helper (secured)
+	 */
+	public function debug_helper()
+	{
+		if (!defined("WP_DEBUG") || !WP_DEBUG) {
+			return;
+		} ?>
         <script>
         if (window.ga4Config && window.ga4Config.debug) {
             setTimeout(function() {
@@ -1487,6 +1774,7 @@ class GA4DT_Tracker {
                 console.log('All Events:', dataLayer);
                 console.log('Page Data:', window.ga4PageData);
                 console.log('Config:', window.ga4Config);
+                console.log('Single Product Data:', window.ga4SingleProduct || 'N/A');
 
                 var saleItems = [];
                 dataLayer.forEach(function(event) {
@@ -1512,5 +1800,5 @@ class GA4DT_Tracker {
         }
         </script>
         <?php
-    }
+	}
 }
